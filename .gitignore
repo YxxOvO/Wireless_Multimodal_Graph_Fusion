@@ -1,0 +1,5 @@
+*.docx
+*.pth
+logs_train/
+__pycache__/
+.DS_Store
