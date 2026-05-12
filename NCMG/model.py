@@ -66,80 +66,78 @@ class MLPLayer(nn.Module):
 
     
 class MLPLayer_comp(nn.Module):
-    def __init__(self, in_features, out_features1,out_features2):
+    def __init__(self, in_features, out_features1, out_features2):
         super(MLPLayer_comp, self).__init__()
-        
+
         self.in_features = in_features
         self.out_features1 = out_features1
-        
         self.out_features2 = out_features2
-        
-        if out_features2==1:
-            
-            
-            self.weight = nn.Parameter(torch.randn([in_features, out_features1],dtype=torch.cfloat)).to(device)
-            
-            
-        
-            self.bias = nn.Parameter(torch.randn([out_features1],dtype=torch.cfloat)).to(device)
-            
-        else:
-            
-            self.weight = nn.Parameter(torch.randn([in_features, out_features1,out_features2],dtype=torch.cfloat)).to(device)
 
-            self.bias = nn.Parameter(torch.randn([out_features1,out_features2],dtype=torch.cfloat)).to(device)
+        if out_features2 == 1:
+            self.weight = nn.Parameter(torch.FloatTensor(in_features, out_features1))
+            self.bias = nn.Parameter(torch.FloatTensor(out_features1))
+        else:
+            self.weight = nn.Parameter(torch.FloatTensor(in_features, out_features1, out_features2))
+            self.bias = nn.Parameter(torch.FloatTensor(out_features1, out_features2))
 
         self.reset_parameters()
 
-        #self.register_parameter('bias', None)
-
     def reset_parameters(self):
-
-        def xavier_uniform_(tensor, gain=1.):
-            fan_in, fan_out = tensor.size()[-2:]
-            std = gain * math.sqrt(2.0 / float(fan_in + fan_out))
-            a = math.sqrt(3.0) * std  # Calculate uniform bounds from standard deviation
-            return torch.nn.init._no_grad_uniform_(tensor, -a, a)
-
         gain = nn.init.calculate_gain("relu")
-        xavier_uniform_(self.weight, gain=gain)
-        if self.bias is not None:
+        if self.out_features2 == 1:
+            w_r = self.weight.data[..., :1]
+            w_i = self.weight.data[..., 1:]
+            b_r = self.bias.data[..., :1]
+            b_i = self.bias.data[..., 1:]
+            std_r = gain * math.sqrt(2.0 / float(self.in_features + self.out_features1))
+            a_r = math.sqrt(3.0) * std_r
+            nn.init._no_grad_uniform_(w_r, -a_r, a_r)
+            nn.init._no_grad_uniform_(w_i, -a_r, a_r)
+            nn.init.zeros_(b_r)
+            nn.init.zeros_(b_i)
+        else:
+            std = gain * math.sqrt(2.0 / float(self.in_features + self.out_features1))
+            a = math.sqrt(3.0) * std
+            nn.init._no_grad_uniform_(self.weight, -a, a)
             nn.init.zeros_(self.bias)
 
     def forward(self, input):
-        
-        
-        #w1=torch.einsum('ni,io->no', e1*e2, self.weight)
-        #w2=torch.einsum('ni,io->no', w1,e2.transpose(0,1))
-        
-        if self.out_features2==1:
-            
-            output = torch.einsum('bmi,io->bmo', input, self.weight)+self.bias
+        if self.out_features2 == 1:
+            w_real = self.weight[..., :1] if self.weight.dim() > 1 else self.weight
+            w_imag = self.weight[..., 1:] if self.weight.dim() > 1 else None
+            b_real = self.bias[..., :1] if self.bias.dim() > 1 else self.bias
+            b_imag = self.bias[..., 1:] if self.bias.dim() > 1 else None
+            if w_imag is not None:
+                w_complex = torch.complex(w_real, w_imag)
+                output = torch.einsum('bmi,io->bmo', input, w_complex)
+                if b_imag is not None:
+                    b_complex = torch.complex(b_real, b_imag)
+                    output = output + b_complex
+                else:
+                    output = output + b_real
+                return output
+            else:
+                output = torch.einsum('bmi,io->bmo', input, w_real) + b_real
+                return output
         else:
-            
-            output = torch.einsum('bmi,ipo->bmpo', input, self.weight)+self.bias
-        #bias=torch.matmul(e1*e2,self.bias)
-        
-        return output    
+            output = torch.einsum('bmi,ipo->bmpo', input, self.weight) + self.bias
+            return output    
 
 
 
 class Transformer(nn.Module):
-    "Self attention layer for `n_channels`."
-    def __init__(self, n_channels, num_heads=1, att_drop=0., act='none'):
+    "Self attention layer with multi-head attention for `n_channels`."
+    def __init__(self, n_channels, num_heads=8, att_drop=0., act='none'):
         super(Transformer, self).__init__()
         self.n_channels = n_channels
         self.num_heads = num_heads
-        
-        self.hid=self.n_channels//4
-        
+        self.head_dim = n_channels // num_heads
+        assert n_channels % num_heads == 0, "n_channels must be divisible by num_heads"
 
-        self.query = nn.Linear(self.n_channels, self.n_channels//4)
-        self.key   = nn.Linear(self.n_channels, self.n_channels//4)
+        self.query = nn.Linear(self.n_channels, self.n_channels)
+        self.key   = nn.Linear(self.n_channels, self.n_channels)
         self.value = nn.Linear(self.n_channels, self.n_channels)
-        
-        
-        self.q=nn.Parameter(torch.FloatTensor(self.n_channels, self.n_channels//4)).to(device)
+        self.out_proj = nn.Linear(self.n_channels, self.n_channels)
 
         self.gamma = nn.Parameter(torch.tensor([0.]))
         self.att_drop = nn.Dropout(att_drop)
@@ -149,15 +147,12 @@ class Transformer(nn.Module):
             self.act = torch.nn.ReLU()
         elif act == 'leaky_relu':
             self.act = torch.nn.LeakyReLU(0.2)
-        
-        
 
     def reset_parameters(self):
-
         def xavier_uniform_(tensor, gain=1.):
             fan_in, fan_out = tensor.size()[-2:]
             std = gain * math.sqrt(2.0 / float(fan_in + fan_out))
-            a = math.sqrt(3.0) * std  # Calculate uniform bounds from standard deviation
+            a = math.sqrt(3.0) * std
             return torch.nn.init._no_grad_uniform_(tensor, -a, a)
 
         gain = nn.init.calculate_gain('leaky_relu', 0.2)
@@ -169,37 +164,22 @@ class Transformer(nn.Module):
         nn.init.zeros_(self.value.bias)
 
     def forward(self, x, mask=None):
-        B, N, C = x.size() # batchsize, nodes, channels
-        
+        B, N, C = x.size()
 
-        f = self.query(x)# 
-        g = self.key(x)  # 
-        h = self.value(x) #
-        
-        beta=F.softmax(torch.einsum('bij,bjk->bik', f, g.permute(0,2,1))/(math.sqrt(self.hid)),dim=2)
+        q = self.query(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.key(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.value(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
 
-        
-        beta = self.att_drop(beta)
-        
-        
-        aa=h[:,:,:,None]
+        scale = math.sqrt(self.head_dim)
+        attn_scores = torch.einsum('bhij,bhkj->bhik', q, k) / scale
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_weights = self.att_drop(attn_weights)
 
-        b=beta.permute(0,2,1)
+        attn_output = torch.einsum('bhik,bhkj->bhij', attn_weights, v)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(B, N, C)
+        attn_output = self.out_proj(attn_output)
 
-        bb=b[:,:,None,:]
-
-        aa=aa.repeat(1,1,1,N)
-
-        bb=bb.repeat(1,1,C,1)
-
-        c=bb*aa
-
-        d=torch.sum(c,1)
-
-        d=d.permute(0,2,1)
-        
-        
-        return self.gamma*d + x
+        return self.gamma * attn_output + x
 
 
 class VisualGNN(nn.Module):
@@ -227,7 +207,7 @@ class VisualGNN(nn.Module):
             nn.Dropout(dropout),
         )
         
-        self.layer_mid = Transformer(hidden, num_heads=1)
+        self.layer_mid = Transformer(hidden, num_heads=8)
 
     def forward(self, x1, x2, x3):
         features1 = self.layers_1(x1)
@@ -266,7 +246,7 @@ class WirelessGNN(nn.Module):
             nn.Dropout(dropout),
         )
         
-        self.layer_mid = Transformer(hidden, num_heads=1)
+        self.layer_mid = Transformer(hidden, num_heads=8)
 
     def forward(self, x1, x2, x3):
         features1 = self.layers_1(x1)
@@ -283,11 +263,12 @@ class CrossStitchUnit(nn.Module):
         super(CrossStitchUnit, self).__init__()
         self.features1 = features1
         self.features2 = features2
-        # 4 sub-matrices for cross-modal fusion
-        self.A = nn.Parameter(torch.eye(features1))  # v -> v
-        self.B = nn.Parameter(torch.zeros(features2, features1))  # w -> v
-        self.C = nn.Parameter(torch.zeros(features1, features2))  # v -> w
-        self.D = nn.Parameter(torch.eye(features2))  # w -> w
+        self.A = nn.Parameter(torch.eye(features1))
+        self.B = nn.Parameter(torch.zeros(features2, features1))
+        self.C = nn.Parameter(torch.zeros(features1, features2))
+        self.D = nn.Parameter(torch.eye(features2))
+        self.gate_v = nn.Sequential(nn.Linear(features1 + features2, 2), nn.Softmax(dim=-1))
+        self.gate_w = nn.Sequential(nn.Linear(features1 + features2, 2), nn.Softmax(dim=-1))
 
     def forward(self, feature1, feature2):
         batch_size = feature1.size(0)
@@ -299,8 +280,20 @@ class CrossStitchUnit(nn.Module):
         fused1 = torch.matmul(feature1_flat, self.A) + torch.matmul(feature2_flat, self.B.t())
         fused2 = torch.matmul(feature1_flat, self.C.t()) + torch.matmul(feature2_flat, self.D)
 
+        concat = torch.cat([feature1, feature2], dim=-1)
+        gate_v = self.gate_v(concat).unsqueeze(-2)
+        gate_w = self.gate_w(concat).unsqueeze(-2)
+
         fused1 = fused1.reshape(batch_size, seq_len, self.features1)
         fused2 = fused2.reshape(batch_size, seq_len, self.features2)
+
+        f1_weight = gate_v[..., 0:1]
+        f2_weight = gate_v[..., 1:2]
+        f1_weight = f1_weight.expand(-1, -1, self.features1)
+        f2_weight = f2_weight.expand(-1, -1, self.features2)
+
+        fused1 = fused1 * f1_weight + feature1 * (1 - f1_weight)
+        fused2 = fused2 * f2_weight + feature2 * (2 - f2_weight)
 
         return fused1, fused2
 
@@ -315,10 +308,15 @@ class NCMG(nn.Module):
         self.node1 = node_1
         self.node2 = node_2
         self.node3 = node_3
-        
+
+        proj_dim = args.get("visual_proj_dim", 128)
+        self.visual_proj = nn.Linear(feature_1_visual, proj_dim)
+        self.bs_visual_proj = nn.Linear(feature_2_visual, proj_dim)
+        self.irs_visual_proj = nn.Linear(feature_3_visual, proj_dim)
+
         # Initialize Visual and Wireless GNNs
-        self.visual_gnn = VisualGNN(args, node_1, feature_1_visual, node_2, 
-                                  feature_2_visual, node_3, feature_3_visual, hidden, dropout)
+        self.visual_gnn = VisualGNN(args, node_1, proj_dim, node_2,
+                                  proj_dim, node_3, proj_dim, hidden, dropout)
         self.wireless_gnn = WirelessGNN(args, node_1, feature_1_wireless, node_2, 
                                       feature_2_wireless, node_3, feature_3_wireless, hidden, dropout)
         
@@ -329,7 +327,7 @@ class NCMG(nn.Module):
         # self.cross_stitch_transformer_input = CrossStitchUnit(hidden * 2, hidden * 2)
         self.cross_stitch_transformer_output = CrossStitchUnit(hidden * 2, hidden * 2)
         
-        self.transformer = Transformer(hidden * 2, num_heads=1)
+        self.transformer = Transformer(hidden * 2, num_heads=8)
         
         # beamforming
         
@@ -371,8 +369,12 @@ class NCMG(nn.Module):
         # ==========================
         # Step 1: 初始层模态交互
         # ==========================
+        # Project visual features to lower dimension
+        x1_visual_proj = self.visual_proj(x1_visual)
+        x2_visual_proj = self.bs_visual_proj(x2_visual)
+        x3_visual_proj = self.irs_visual_proj(x3_visual)
         # Process through individual GNNs
-        visual_features = self.visual_gnn(x1_visual, x2_visual, x3_visual)
+        visual_features = self.visual_gnn(x1_visual_proj, x2_visual_proj, x3_visual_proj)
         wireless_features = self.wireless_gnn(x1_wireless, x2_wireless, x3_wireless)
         visual_features, wireless_expanded = self.cross_stitch_initial(visual_features, wireless_features)
 
@@ -406,35 +408,18 @@ class NCMG(nn.Module):
         # Step 7: 后续处理（如 beamforming）
         # ==========================
 
-        p=fused_features[:,0:self.node1,:]
-        
-        p0=torch.zeros_like(p)
-        
-        
-        c=torch.stack((p,p0),dim=3)
-        
-        p=torch.view_as_complex(c)
-        
-        
-        
-        phi=fused_features[:,self.node1:self.node1+self.node2,:]
-        
-        b=fused_features[:,self.node1+self.node2:self.node1+self.node2+self.node3,:]
-        
-        p_f=self.layer_2p(self.layer_1p(p))
-        
-        
-        p_fr=torch.reshape(p_f,[self.args.get("batch"),self.args.get("num_users")*self.args.get("BS_antenna")*self.args.get("sub_bands")*args.get("stream")])
-        
-        denom=torch.sqrt(torch.sum(torch.abs(p_fr).pow(2),dim=1))
-        
-        denom=denom[:,None]
-        
-        p_rf=denom.expand(-1,self.args.get("num_users")*self.args.get("BS_antenna")*self.args.get("sub_bands")*args.get("stream"))
-        
-        p_ff=math.sqrt(self.args.get("P_max"))*torch.div(p_fr,p_rf)
-        
-        beamforming=torch.reshape(p_ff,[self.args.get("batch"),self.args.get("num_users"),self.args.get("BS_antenna"),args.get("stream"),self.args.get("sub_bands")])
+        p = fused_features[:, 0:self.node1, :]
+        p_complex = torch.complex(p, torch.zeros_like(p))
+        p_f = self.layer_2p(self.layer_1p(p_complex))
+
+        p_fr = torch.reshape(p_f.real, [self.args.get("batch"), self.args.get("num_users") * self.args.get("BS_antenna") * self.args.get("sub_bands") * self.args.get("stream")])
+
+        denom = torch.sqrt(torch.sum(p_fr.pow(2), dim=1))
+        denom = denom[:, None]
+        denom = denom.expand(-1, self.args.get("num_users") * self.args.get("BS_antenna") * self.args.get("sub_bands") * self.args.get("stream"))
+        p_ff = math.sqrt(self.args.get("P_max")) * torch.div(p_fr, denom)
+
+        beamforming = torch.reshape(p_ff, [self.args.get("batch"), self.args.get("num_users"), self.args.get("BS_antenna"), self.args.get("stream"), self.args.get("sub_bands")])
         
         #phase shift and amplitude
         

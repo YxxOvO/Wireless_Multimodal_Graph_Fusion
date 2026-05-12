@@ -74,6 +74,8 @@ def parse_args():
     parser.add_argument('--epochs', default=250, type=int, help='Number of epochs')
     parser.add_argument('--log_step', default=100, type=int, help='Log step')
     parser.add_argument('--lr_decay', action='store_true', default=True, help='Learning rate decay')
+    parser.add_argument('--visual_proj_dim', default=128, type=int, help='Visual feature projection dimension')
+    parser.add_argument('--early_stop_patience', default=50, type=int, help='Early stopping patience')
 
     # 添加日志目录和模型保存路径的命令行参数
     parser.add_argument('--log_dir', default='logs_train', type=str, help='日志保存路径')

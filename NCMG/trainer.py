@@ -32,14 +32,12 @@ class Trainer(object):
         self.lr_scheduler = lr_scheduler
         self.train_per_epoch = len(train_loader)
         
-        self.la=nn.Parameter(torch.FloatTensor(7))
-        
-        
-        nn.init.constant_(self.la, 0.1)
-        
-        self.lam1=args.get("lam1")
-        
-        self.lam2=args.get("lam2")
+        self.lam1 = max(args.get("lam1"), 0.0)
+        self.lam2 = args.get("lam2")
+        self.best_loss = float('inf')
+        self.not_improved_count = 0
+        self.early_stop_patience = args.get('early_stop_patience', 50)
+        self.best_state = None
         
         
         #log
@@ -487,7 +485,7 @@ class Trainer(object):
         
         band=band.detach()
         
-        self.lam1=F.relu(self.lam1+torch.sum(self.args.get("r_u_min")-torch.sum(r_s_u,dim=1))/batch)
+        self.lam1 = min(self.lam1 + torch.sum(self.args.get("r_u_min") - torch.sum(r_s_u, dim=1)) / batch, 500.0)
         
         # self.lam2=F.relu(self.lam2+torch.sum(cons-torch.sum(band[:,0,:],dim=1))/batch)
         
@@ -813,16 +811,13 @@ class Trainer(object):
                 best_loss = val_epoch_loss
                 not_improved_count = 0
                 best_state = True
+                self.best_state = self.model.state_dict()
             else:
                 not_improved_count += 1
                 best_state = False
-            # early stop
-            if self.args.get('early_stop'):
-                if not_improved_count == self.args.get('early_stop_patience'):
-                    print("Validation performance didn\'t improve for {} epochs. "
-                                    "Training stops.".format(self.args.get('early_stop_patience')))
-                    break
-            # save the best state
+            if not_improved_count == self.early_stop_patience:
+                print(f"Early stopping: no improvement for {self.early_stop_patience} epochs.")
+                break
             
 
         training_time = time.time() - start_time
