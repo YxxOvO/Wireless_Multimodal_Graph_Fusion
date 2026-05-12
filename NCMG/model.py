@@ -86,13 +86,12 @@ class MLPLayer_comp(nn.Module):
         else:
             
             self.weight = nn.Parameter(torch.randn([in_features, out_features1,out_features2],dtype=torch.cfloat)).to(device)
-        
+
             self.bias = nn.Parameter(torch.randn([out_features1,out_features2],dtype=torch.cfloat)).to(device)
-            
-            
-            
+
+        self.reset_parameters()
+
         #self.register_parameter('bias', None)
-        #self.reset_parameters()
 
     def reset_parameters(self):
 
@@ -282,32 +281,27 @@ class WirelessGNN(nn.Module):
 class CrossStitchUnit(nn.Module):
     def __init__(self, features1, features2):
         super(CrossStitchUnit, self).__init__()
-        # Learnable matrix for feature combination
         self.features1 = features1
         self.features2 = features2
-        self.cross_stitch = nn.Parameter(
-            torch.eye(features1 + features2)  # Initialize as identity matrix
-        )
+        # 4 sub-matrices for cross-modal fusion
+        self.A = nn.Parameter(torch.eye(features1))  # v -> v
+        self.B = nn.Parameter(torch.zeros(features2, features1))  # w -> v
+        self.C = nn.Parameter(torch.zeros(features1, features2))  # v -> w
+        self.D = nn.Parameter(torch.eye(features2))  # w -> w
 
     def forward(self, feature1, feature2):
-        # Reshape inputs if needed
         batch_size = feature1.size(0)
         seq_len = feature1.size(1)
-        
-        # Reshape to 2D for matrix multiplication
-        feature1_flat = feature1.reshape(-1, self.features1)  # [batch*seq_len, features1]
-        feature2_flat = feature2.reshape(-1, self.features2)  # [batch*seq_len, features2]
-        
-        # Concatenate features
-        combined_features = torch.cat([feature1_flat, feature2_flat], dim=-1)  # [batch*seq_len, features1+features2]
-        
-        # Apply cross-stitch matrix
-        fused_features = torch.matmul(combined_features, self.cross_stitch)  # [batch*seq_len, features1+features2]
-        
-        # Split and reshape back
-        fused1 = fused_features[:, :self.features1].reshape(batch_size, seq_len, self.features1)
-        fused2 = fused_features[:, self.features1:].reshape(batch_size, seq_len, self.features2)
-        
+
+        feature1_flat = feature1.reshape(-1, self.features1)
+        feature2_flat = feature2.reshape(-1, self.features2)
+
+        fused1 = torch.matmul(feature1_flat, self.A) + torch.matmul(feature2_flat, self.B.t())
+        fused2 = torch.matmul(feature1_flat, self.C.t()) + torch.matmul(feature2_flat, self.D)
+
+        fused1 = fused1.reshape(batch_size, seq_len, self.features1)
+        fused2 = fused2.reshape(batch_size, seq_len, self.features2)
+
         return fused1, fused2
 
 class NCMG(nn.Module):
@@ -342,8 +336,6 @@ class NCMG(nn.Module):
         self.layer_1p=MLPLayer_comp(hidden*2,args.get("BS_antenna")*args.get("sub_bands")*args.get("stream"),1)
         #self.layer_norm_1p=nn.LayerNorm([args.get("num_users"),args.get("BS_antenna")*args.get("sub_bands")])
         self.layer_2p=MLPLayer_comp(args.get("BS_antenna")*args.get("sub_bands")*args.get("stream"),args.get("BS_antenna")*args.get("sub_bands")*args.get("stream"),1)
-        #self.layer_norm_2p=nn.LayerNorm([args.get("num_users"),args.get("BS_antenna")*args.get("sub_bands")])
-        #self.layer_3p=MLPLayer_comp(args.get("BS_antenna")*args.get("sub_bands")*args.get("stream"),args.get("BS_antenna")*args.get("sub_bands")*args.get("stream"),1)
         
         
         #phase shift amplitude
@@ -351,21 +343,20 @@ class NCMG(nn.Module):
         self.layer_norm_1phi=nn.LayerNorm([1,self.args.get("IRS_elements")])
         self.layer_2phi=MLPLayer(args.get("IRS_elements"),args.get("IRS_elements"),1)
         self.layer_norm_2phi=nn.LayerNorm([1,self.args.get("IRS_elements")])
-        self.layer_3phi=MLPLayer(args.get("IRS_elements"),args.get("IRS_elements"),1)
         
         #bandwidth
         self.layer_1b=MLPLayer(hidden*2,args.get("sub_bands"),1)
         self.layer_norm_1b=nn.LayerNorm([1,args.get("sub_bands")])
         self.layer_2b=MLPLayer(args.get("sub_bands"),args.get("sub_bands"),1)
         self.layer_norm_2b=nn.LayerNorm([1,args.get("sub_bands")])
-        self.layer_3b=MLPLayer(args.get("sub_bands"),args.get("sub_bands"),1)
 
        
 
         self.prelu = nn.RReLU(0.1,0.4)
         self.dropout = nn.Dropout(dropout)
-        
+
         self.sig=nn.Sigmoid()
+        self.register_buffer('two_pi', torch.tensor(2*math.pi))
 
         #self.reset_parameters()
 
@@ -417,7 +408,7 @@ class NCMG(nn.Module):
 
         p=fused_features[:,0:self.node1,:]
         
-        p0=torch.zeros(p.shape[0],p.shape[1],p.shape[2]).to(device)
+        p0=torch.zeros_like(p)
         
         
         c=torch.stack((p,p0),dim=3)
@@ -452,7 +443,7 @@ class NCMG(nn.Module):
         
         phi_h1=torch.reshape(phi_h,[self.args.get("batch"),1,self.args.get("IRS_elements"),1])
         
-        phi_h1[:,:,:,0]=2*torch.tensor(math.pi)*self.sig(phi_h1[:,:,:,0])
+        phi_h1=self.two_pi*self.sig(phi_h1)
         
         #bandwidth
         b0=F.relu(self.layer_norm_1b(self.layer_1b(b)))
@@ -474,6 +465,6 @@ class NCMG(nn.Module):
         
         b_final=self.args.get("b_max")-F.relu(self.args.get("b_max")-b_final)
         
-        torch.cuda.empty_cache
+        torch.cuda.empty_cache()
         
         return beamforming, phi_h1, b_final[:,None,:] 
