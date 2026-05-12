@@ -6,7 +6,7 @@
 
 This repository implements **NCMG (Node-Centric Multimodal Graph)**, a multimodal graph fusion framework for IRS-assisted THz MIMO communication systems. NCMG jointly optimizes beamforming, IRS phase shifts, and sub-carrier bandwidth allocation by unifying visual scene features and wireless channel state information through a heterogeneous graph structure.
 
-![System Architecture](https://img.shields.io/badge/THz-MIMO-IRS-green?style=flat-square)
+![THz MIMO IRS](https://img.shields.io/badge/THz%20MIMO%20IRS-green?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.8+-blue?style=flat-square)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red?style=flat-square)
 
