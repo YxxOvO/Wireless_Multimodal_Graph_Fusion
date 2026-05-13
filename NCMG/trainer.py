@@ -75,9 +75,9 @@ class Trainer(object):
         a_bs1=j*self.args.get("angles_B")*2*torch.tensor(math.pi)*self.args.get("antenna_space")/c
         
         f_bs=f[:,:,:,None]
-        f_bs=f_bs.repeat(1,1,1,self.args.get("BS_antenna"))
+        f_bs=f_bs.expand(1,1,1,self.args.get("BS_antenna"))
         a_bs1=a_bs1[None,None,None,:]
-        a_bs1=a_bs1.repeat(batch,self.args.get("sub_bands"),int_samp,1)
+        a_bs1=a_bs1.expand(batch,self.args.get("sub_bands"),int_samp,1)
         
         
         
@@ -87,14 +87,14 @@ class Trainer(object):
         a_irs=j*self.args.get("angles_R")*2*torch.tensor(math.pi)*self.args.get("IRS_space")/c
         
         f_irs=f[:,:,:,None]
-        f_irs=f_irs.repeat(1,1,1,self.args.get("IRS_elements"))
+        f_irs=f_irs.expand(1,1,1,self.args.get("IRS_elements"))
         a_irs1=a_irs[None,None,None,:]
-        a_irs1=a_irs1.repeat(batch,self.args.get("sub_bands"),int_samp,1)
+        a_irs1=a_irs1.expand(batch,self.args.get("sub_bands"),int_samp,1)
         
         a_irs=(1/self.args.get("IRS_elements"))*torch.exp(f_irs*a_irs1) #B S INT_SAMP L^2
         
         f_br=f[:,:,:,None,None]
-        f_br=f_br.repeat(1,1,1,self.args.get("IRS_elements"),self.args.get("BS_antenna"))
+        f_br=f_br.expand(1,1,1,self.args.get("IRS_elements"),self.args.get("BS_antenna"))
         k_abs=torch.exp(eta1+eta2*f_br)+eta3
         
         f_inv=torch.div(1,f_br)
@@ -114,13 +114,13 @@ class Trainer(object):
         
         
         ang_ur=ang_ur[:,None,None,:,:]
-        ang_ur=ang_ur.repeat(1,self.args.get("sub_bands"),int_samp,1,1)
-        
+        ang_ur=ang_ur.expand(1,self.args.get("sub_bands"),int_samp,1,1)
+
         dist_ur=dist_ur[:,None,None,:,None,:]
-        dist_ur=dist_ur.repeat(1,self.args.get("sub_bands"),int_samp,1,self.args.get("user_antenna"),self.args.get("IRS_elements"))
+        dist_ur=dist_ur.expand(1,self.args.get("sub_bands"),int_samp,1,self.args.get("user_antenna"),self.args.get("IRS_elements"))
         
         f_ur=f[:,:,:,None,None]
-        f_ur=f_ur.repeat(1,1,1,self.args.get("num_users"),self.args.get("IRS_elements"))
+        f_ur=f_ur.expand(1,1,1,self.args.get("num_users"),self.args.get("IRS_elements"))
         
         
         
@@ -131,13 +131,13 @@ class Trainer(object):
         
         #new
         f_ur2=f[:,:,:,None,None]
-        f_ur2=f_ur2.repeat(1,1,1,self.args.get("num_users"),self.args.get("user_antenna"))
-        
+        f_ur2=f_ur2.expand(1,1,1,self.args.get("num_users"),self.args.get("user_antenna"))
+
         a_ur1=j*ang_uBR[:,:,1,:]*2*torch.tensor(math.pi)*self.args.get("antenna_space")/c
-        
+
         a_ur1=a_ur1[:,None,None,:,:]
-        
-        a_ur1=a_ur1.repeat(1,self.args.get("sub_bands"),int_samp,1,1)
+
+        a_ur1=a_ur1.expand(1,self.args.get("sub_bands"),int_samp,1,1)
         
         #print(f_ur2.shape)
         
@@ -147,9 +147,9 @@ class Trainer(object):
         
         
         outer_ur=torch.einsum('bsoij,bsoik->bsoijk',a_ur1,torch.conj(a_ur)) #dimension N_r * L
-        
+
         f_ur3=f[:,:,:,None,None,None]
-        f_ur3=f_ur3.repeat(1,1,1,self.args.get("num_users"),self.args.get("user_antenna"),self.args.get("IRS_elements"))
+        f_ur3=f_ur3.expand(1,1,1,self.args.get("num_users"),self.args.get("user_antenna"),self.args.get("IRS_elements"))
         
         k_abs_ur=torch.exp(eta1+eta2*f_ur3)+eta3
         
@@ -170,13 +170,13 @@ class Trainer(object):
         
         
         ang_ub=ang_ub[:,None,None,:,:]
-        ang_ub=ang_ub.repeat(1,self.args.get("sub_bands"),int_samp,1,1)
-        
+        ang_ub=ang_ub.expand(1,self.args.get("sub_bands"),int_samp,1,1)
+
         dist_ub=dist_ub[:,None,None,:,None,:]
-        dist_ub=dist_ub.repeat(1,self.args.get("sub_bands"),int_samp,1,self.args.get("user_antenna"),self.args.get("BS_antenna"))
-        
+        dist_ub=dist_ub.expand(1,self.args.get("sub_bands"),int_samp,1,self.args.get("user_antenna"),self.args.get("BS_antenna"))
+
         f_ub=f[:,:,:,None,None]
-        f_ub=f_ub.repeat(1,1,1,self.args.get("num_users"),self.args.get("BS_antenna"))
+        f_ub=f_ub.expand(1,1,1,self.args.get("num_users"),self.args.get("BS_antenna"))
         
         a_ub=j*ang_ub*2*torch.tensor(math.pi)*self.args.get("antenna_space")/c
         a_ub=(1/math.sqrt(self.args.get("BS_antenna")))*torch.exp(a_ub*f_ub)
@@ -184,19 +184,19 @@ class Trainer(object):
         
         #new
         f_ub2=f[:,:,:,None,None]
-        f_ub2=f_ub2.repeat(1,1,1,self.args.get("num_users"),self.args.get("user_antenna"))
-        
+        f_ub2=f_ub2.expand(1,1,1,self.args.get("num_users"),self.args.get("user_antenna"))
+
         a_ub1=j*ang_uBR[:,:,0,:]*2*torch.tensor(math.pi)*self.args.get("antenna_space")/c
-        
+
         a_ub1=a_ub1[:,None,None,:,:]
-        
-        a_ub1=a_ub1.repeat(1,self.args.get("sub_bands"),int_samp,1,1)
+
+        a_ub1=a_ub1.expand(1,self.args.get("sub_bands"),int_samp,1,1)
         
         a_ub1=(1/math.sqrt(self.args.get("user_antenna")))*torch.exp(a_ub1*f_ub2)
         
         
         f_ub3=f[:,:,:,None,None,None]
-        f_ub3=f_ub3.repeat(1,1,1,self.args.get("num_users"),self.args.get("user_antenna"),self.args.get("BS_antenna"))
+        f_ub3=f_ub3.expand(1,1,1,self.args.get("num_users"),self.args.get("user_antenna"),self.args.get("BS_antenna"))
         
         
         k_abs_ub=torch.exp(eta1+eta2*f_ub3)+eta3
@@ -243,7 +243,7 @@ class Trainer(object):
         # h_br B sub_band int_samp  N_t L
         
         h_rb=h_rb[:,:,:,None,:,:]
-        h_rb=h_rb.repeat(1,1,1,self.args.get("num_users"),1,1)
+        h_rb=h_rb.expand(1,1,1,self.args.get("num_users"),1,1)
         
         # h_br B sub_band int_samp U N_t L
         
@@ -273,12 +273,12 @@ class Trainer(object):
         #print( h_u_transmission.shape)
             
         noise=self.args.get("noise_pow")*bs
-        
+
         #print(noise.shape)
-        
+
         noise=noise[:,:,:,:,None,None]
-        
-        noise=noise.repeat(1,1,1,1,self.args.get("user_antenna"),self.args.get("user_antenna"))
+
+        noise=noise.expand(1,1,1,1,self.args.get("user_antenna"),self.args.get("user_antenna"))
         
         power=torch.permute(power,(0,4,1,2,3))
 
@@ -289,10 +289,10 @@ class Trainer(object):
         
         
         I=torch.eye(self.args.get("num_users")).to(device)+0*j
-        
+
         I=I[None,None,None,:,:]
-        
-        I=I.repeat(batch,self.args.get("sub_bands"),int_samp,1,1)
+
+        I=I.expand(batch,self.args.get("sub_bands"),int_samp,1,1)
         
         nu=torch.einsum('bsiku,bsiurt->bsikrt',I,rate_s_u)
         
@@ -301,10 +301,10 @@ class Trainer(object):
         #print(de)
         
         I_r=torch.eye(self.args.get("user_antenna")).to(device)
-        
+
         I_r=I_r[None,None,None,None,:,:]
-        
-        I_r=I_r.repeat(batch,self.args.get("sub_bands"),int_samp,self.args.get("num_users"),1,1)+0*j
+
+        I_r=I_r.expand(batch,self.args.get("sub_bands"),int_samp,self.args.get("num_users"),1,1)+0*j
         
         #rate_f1=I_r+torch.einsum('bsiurt,bsiutp->bsiurp',nu,torch.linalg.inv(de))
         #print(nu[0,0,0,:])
@@ -313,57 +313,19 @@ class Trainer(object):
         #print((de == 0).nonzero())
         
         rate_f=torch.log2(torch.linalg.det(I_r+torch.einsum('bsiurt,bsiutp->bsiurp',nu,torch.linalg.inv(de+1e-10))).real)
-        
-        del h_u_all
-       # del h_u_transmission
-       # del h_u_tra1
-        #del h_u_reflection
-        #del h_u_ref1
-        del h_rb
-        del h_u_1
-       # del G_t
-        del G_r
-        del h_ub
-        del h_ur
-        #del f_rate
-        del I
-        del f_bs
-        del a_bs1
-        del f_br
-        del k_abs
-        
-        
-        del f_inv
-        del c1
-        #del c2
-        del a_irs
-        del a_irs1
-        del alpha_br
-        
-        del a_bs
-        
-        del outer_br
-        del f_ur
-        del f_ub
-        del de
-        del nu
-        del f_ur2
-        del f_ub2
-        del f_ub3
-        del f_ur3
-        del outer_ur
-        del a_ub1
-        del outer_ub
-        del noise
-        del I_r
-        #del I
-        del rate_s_u
-        del rate_s_u1
-        
-        
-        
+
+        # =========================================================================
+        # Cleanup: del tensors that are still referenced after computation
+        # Using expand() creates views, so most intermediates are freed automatically.
+        # Only explicitly del the ones that may hold lingering references.
+        # =========================================================================
+        del h_u_all, h_rb, h_u_1, G_r, h_ub, h_ur, I, f_bs, a_bs1, f_br, k_abs
+        del f_inv, c1, a_irs, a_irs1, alpha_br, a_bs, outer_br, f_ur, f_ub
+        del de, nu, f_ur2, f_ub2, f_ub3, f_ur3, outer_ur, a_ub1, outer_ub, noise, I_r
+        del rate_s_u, rate_s_u1
+
         torch.cuda.empty_cache()
-        
+
         return rate_f
         
         
@@ -479,8 +441,17 @@ class Trainer(object):
         #    f.write('\n')
         
         loss=(-torch.sum(r_s_u)+self.lam1*torch.sum(cons_rate))/(batch*1e10)
-        
-        
+
+        # Fairness auxiliary loss: Jain's Fairness Index
+        # Compute per-user total rates (sum over sub-bands)
+        total_user_rate = r_s_u.sum(dim=1)  # (batch, num_users)
+        # Jain's Fairness Index: (sum(r_i)^2) / (n * sum(r_i^2))
+        fairness_index = (total_user_rate.sum(dim=1, keepdim=True) ** 2) / (
+            self.args.get("num_users") * (total_user_rate ** 2).sum(dim=1, keepdim=True) + 1e-10
+        )
+        fairness_weight = self.args.get("fairness_weight", 0.05)
+        loss = loss + fairness_weight * (1 - fairness_index.mean())
+
         r_s_u = r_s_u.detach()
         
         band=band.detach()

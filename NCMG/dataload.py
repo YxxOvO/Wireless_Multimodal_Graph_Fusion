@@ -1,13 +1,21 @@
 import os
 # os.environ["CUDA_VISIBLE_DEVICES"] = '8'
 import numpy as np
-import torch 
+import torch
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
 from PIL import Image
 import math
 import torch.nn.functional as F
 import argparse
+
+try:
+    import clip
+    CLIP_AVAILABLE = True
+except ImportError:
+    CLIP_AVAILABLE = False
+    import warnings
+    warnings.warn("CLIP not available, falling back to ResNet50")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -76,6 +84,8 @@ def parse_args():
     parser.add_argument('--lr_decay', action='store_true', default=True, help='Learning rate decay')
     parser.add_argument('--visual_proj_dim', default=128, type=int, help='Visual feature projection dimension')
     parser.add_argument('--early_stop_patience', default=50, type=int, help='Early stopping patience')
+    parser.add_argument('--use_clip', default=True, type=bool, help='Use CLIP visual encoder')
+    parser.add_argument('--fairness_weight', default=0.05, type=float, help='Fairness auxiliary loss weight')
 
     # 添加日志目录和模型保存路径的命令行参数
     parser.add_argument('--log_dir', default='logs_train', type=str, help='日志保存路径')
@@ -91,17 +101,36 @@ args = vars(args)
 # 打印参数
 print("使用的参数:", args)
 
-# Load pre-trained ResNet50
-resnet50 = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
-resnet50.eval()
+# Load CLIP visual encoder
+if CLIP_AVAILABLE and args.get('use_clip', True):
+    clip_model, preprocess_clip = clip.load("ViT-B/32", device=device)
+    clip_model.eval()
+    preprocess = preprocess_clip
+else:
+    # Fallback to ResNet50
+    resnet50 = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
+    resnet50.eval()
+    preprocess = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
 
-# Define image preprocess
-preprocess = transforms.Compose([
-    transforms.Resize(256),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-])
+# Define CLIP feature extraction function
+def extract_clip_features(image_dir, model):
+    """
+    Extract CLIP ViT-B/32 features from images in a directory.
+    CLIP outputs 512-dim features.
+    """
+    features = []
+    for img_file in os.listdir(image_dir):
+        img_path = os.path.join(image_dir, img_file)
+        img = Image.open(img_path).convert("RGB")
+        input_tensor = preprocess(img).unsqueeze(0).to(device)
+        with torch.no_grad():
+            features.append(model.encode_image(input_tensor).float().cpu().numpy())
+    return np.mean(features, axis=0) if features else np.zeros(512)
 
 # Category directories
 image_dirs = {
@@ -115,6 +144,8 @@ def extract_category_features_with_layers(image_dir, model):
     """
     逐层处理类别文件夹中的图片，提取并计算类别特征的均值。
     """
+    if CLIP_AVAILABLE and args.get('use_clip', True):
+        return extract_clip_features(image_dir, model)
     features = []
     for img_file in os.listdir(image_dir):
         img_path = os.path.join(image_dir, img_file)
@@ -138,18 +169,22 @@ def extract_category_features_with_layers(image_dir, model):
 # Extract features for each category
 category_features = {}
 for category, path in image_dirs.items():
-    category_features[category] = extract_category_features_with_layers(path, resnet50)
+    if CLIP_AVAILABLE and args.get('use_clip', True):
+        category_features[category] = extract_clip_features(path, clip_model)
+    else:
+        category_features[category] = extract_category_features_with_layers(path, resnet50)
 
 # Combine features
 def combine_features(features_dict):
     """
     将三个类别的特征整合为一个用户特征，计算均值。
     """
-    features = [features_dict.get(cat, np.zeros(2048)) for cat in ["car", "trunk", "bus"]]
+    feat_dim = 512 if (CLIP_AVAILABLE and args.get('use_clip', True)) else 2048
+    features = [features_dict.get(cat, np.zeros(feat_dim)) for cat in ["car", "trunk", "bus"]]
     return np.mean(features, axis=0)
 
 # Compute combined user visual feature
-user_visual_feature = combine_features(category_features)  # 2048-dim
+user_visual_feature = combine_features(category_features)  # 512-dim with CLIP, 2048-dim with ResNet50
 
 # 假设您已经为BS和IRS节点定义了相应的图像目录
 image_dirs_bs = r"../dataset/bs"
@@ -160,23 +195,33 @@ def extract_single_category_features(image_dir, model):
     for img_file in os.listdir(image_dir):
         img_path = os.path.join(image_dir, img_file)
         img = Image.open(img_path).convert("RGB")
-        input_tensor = preprocess(img).unsqueeze(0)
-        with torch.no_grad():
-            x = model.conv1(input_tensor)
-            x = model.bn1(x)
-            x = model.relu(x)
-            x = model.maxpool(x)
-            x = model.layer1(x)
-            x = model.layer2(x)
-            x = model.layer3(x)
-            x = model.layer4(x)
-            x = model.avgpool(x).flatten().numpy()
-            features.append(x)
-    return np.mean(features, axis=0) if features else np.zeros(2048)
+        if CLIP_AVAILABLE and args.get('use_clip', True):
+            input_tensor = preprocess(img).unsqueeze(0).to(device)
+            with torch.no_grad():
+                features.append(model.encode_image(input_tensor).float().cpu().numpy())
+        else:
+            input_tensor = preprocess(img).unsqueeze(0)
+            with torch.no_grad():
+                x = model.conv1(input_tensor)
+                x = model.bn1(x)
+                x = model.relu(x)
+                x = model.maxpool(x)
+                x = model.layer1(x)
+                x = model.layer2(x)
+                x = model.layer3(x)
+                x = model.layer4(x)
+                x = model.avgpool(x).flatten().numpy()
+                features.append(x)
+    feat_dim = 512 if (CLIP_AVAILABLE and args.get('use_clip', True)) else 2048
+    return np.mean(features, axis=0) if features else np.zeros(feat_dim)
 
 # 提取BS和IRS的视觉特征均值
-bs_visual_feature = extract_single_category_features(image_dirs_bs, resnet50)
-irs_visual_feature = extract_single_category_features(image_dirs_irs, resnet50)
+if CLIP_AVAILABLE and args.get('use_clip', True):
+    bs_visual_feature = extract_clip_features(image_dirs_bs, clip_model)
+    irs_visual_feature = extract_clip_features(image_dirs_irs, clip_model)
+else:
+    bs_visual_feature = extract_single_category_features(image_dirs_bs, resnet50)
+    irs_visual_feature = extract_single_category_features(image_dirs_irs, resnet50)
 
 def dist(a,b):
     
@@ -218,12 +263,13 @@ user_pos=torch.zeros(args.get("samples"),args.get("num_users"),3)
 
 X_user=torch.zeros(args.get("samples"),args.get("num_users"),3)
 ### angles user-to-irs    U*L^2
-# Initialize X_visual as (samples, num_users, 2048)
-X_user_visual = torch.zeros(args.get("samples"), args.get("num_users"), 2048)
+# Initialize X_visual as (samples, num_users, 512) for CLIP or 2048 for ResNet50
+feat_dim_visual = 512 if (CLIP_AVAILABLE and args.get('use_clip', True)) else 2048
+X_user_visual = torch.zeros(args.get("samples"), args.get("num_users"), feat_dim_visual)
 
-X_bs_visual = torch.zeros(args.get("samples"), 1, 2048)
+X_bs_visual = torch.zeros(args.get("samples"), 1, feat_dim_visual)
 
-X_irs_visual = torch.zeros(args.get("samples"), 1, 2048)
+X_irs_visual = torch.zeros(args.get("samples"), 1, feat_dim_visual)
 
 angles_uR=torch.zeros(args.get("samples"),args.get("num_users"),args.get("IRS_elements"))
 
@@ -283,9 +329,13 @@ for k in range(args.get("samples")):
         cos_phi_cos_theta_uB=abs(user_pos[k,u,0]-args.get("loc_BS")[0])/d_uB
         
         cos_phi_cos_theta_uBR0=abs(user_pos[k,u,0]-args.get("loc_IRS")[0])/d_uR
-        
+
+        # ang_uBR: azimuth/elevation angles from user antenna array to BS/IRS
+        # ang_uBR[:,:,0,:] = BS direction cosines per user antenna element
+        # ang_uBR[:,:,1,:] = IRS direction cosines per user antenna element
+        # This assumes linear antenna array with spacing antenna_space
         angles_uBR[k,u,0,:]=cos_phi_cos_theta_uB*torch.tensor(user_antennas)
-        
+
         angles_uBR[k,u,1,:]=cos_phi_cos_theta_uBR0*torch.tensor(user_antennas)
         
         for l in range(args.get("IRS_elements")):
@@ -297,6 +347,12 @@ for k in range(args.get("samples")):
             angles_uB[k,u,n]=(n%args.get("BS_row"))*sin_phi_cos_theta_uB+math.floor(n/args.get("BS_col"))*sin_theta_uB
         
         #angles_uB[k,u,:]=cos_phi_cos_theta_uB*torch.tensor(BS_antennas)
+
+        # Verify antenna spacing is consistent with wavelength at center frequency
+        center_freq = (args.get("f_start") + args.get("f_end")) / 2
+        wavelength = 3e8 / center_freq
+        # For ULA, element spacing should be <= wavelength/2 to avoid grating lobes
+        assert args.get("antenna_space") <= wavelength / 2, f"Antenna spacing {args.get('antenna_space')} exceeds Nyquist wavelength {wavelength/2}"
 
 args["angles_uR"]=angles_uR.to(device)
 args["angles_uB"]=angles_uB.to(device)
@@ -453,64 +509,65 @@ adj_BS_IRS_visual[0,0]=1/d_BR
 adj_BS_IRS_visual=F.softmax(adj_BS_IRS_visual,dim=1)
 
 # 3. 特征归一化
-# X_BS_visual = F.normalize(X_bs_visual, p=2, dim=2)      # (samples, 1, 2048)
+feat_dim_str = "512" if (CLIP_AVAILABLE and args.get('use_clip', True)) else "2048"
+# X_BS_visual = F.normalize(X_bs_visual, p=2, dim=2)      # (samples, 1, feat_dim)
 X_BS_visual = X_bs_visual/torch.max(X_bs_visual)
-# X_IRS_visual = F.normalize(X_irs_visual, p=2, dim=2)    # (samples, 1, 2048)
+# X_IRS_visual = F.normalize(X_irs_visual, p=2, dim=2)    # (samples, 1, feat_dim)
 X_IRS_visual = X_irs_visual/torch.max(X_irs_visual)
-# X_user_visual_norm = F.normalize(X_user_visual, p=2, dim=2)  # (samples, num_users, 2048)
+# X_user_visual_norm = F.normalize(X_user_visual, p=2, dim=2)  # (samples, num_users, feat_dim)
 X_user_visual_norm = X_user_visual/torch.max(X_user_visual)
 
 # 4. 构建元路径特征
 # 1 U (User)
-X_user_U_visual = X_user_visual_norm  # (samples, num_users, 2048)
+X_user_U_visual = X_user_visual_norm  # (samples, num_users, feat_dim)
 
 # 2 UR (User-IRS)
-X_user_UR_visual = torch.einsum('bij,bjk->bik', adj_user_IRS_visual, X_IRS_visual)  # (samples, num_users, 2048)
+X_user_UR_visual = torch.einsum('bij,bjk->bik', adj_user_IRS_visual, X_IRS_visual)  # (samples, num_users, feat_dim)
 
 # 3 UB (User-BS)
-X_user_UB_visual = torch.einsum('bij,bjk->bik', adj_user_BS_visual, X_BS_visual)  # (samples, num_users, 2048)
+X_user_UB_visual = torch.einsum('bij,bjk->bik', adj_user_BS_visual, X_BS_visual)  # (samples, num_users, feat_dim)
 
 # 4 RB (IRS-BS)
-X_IRS_RB_visual = torch.einsum('ij,bjk->bik', adj_BS_IRS_visual, X_BS_visual)  # (samples, 1, 2048)
+X_IRS_RB_visual = torch.einsum('ij,bjk->bik', adj_BS_IRS_visual, X_BS_visual)  # (samples, 1, feat_dim)
 
 # 5 URB (User-IRS-BS)
-X_user_URB_visual = torch.einsum('bij,bjk->bik', adj_user_IRS_visual, X_IRS_RB_visual)  # (samples, num_users, 2048)
+X_user_URB_visual = torch.einsum('bij,bjk->bik', adj_user_IRS_visual, X_IRS_RB_visual)  # (samples, num_users, feat_dim)
 
 # 6 BR (BS-IRS)
-X_BS_BR_visual = torch.einsum('ij,bjk->bik', adj_BS_IRS_visual, X_IRS_visual)  # (samples, 1, 2048)
+X_BS_BR_visual = torch.einsum('ij,bjk->bik', adj_BS_IRS_visual, X_IRS_visual)  # (samples, 1, feat_dim)
 
 # 7 UBR (User-BS-IRS)
-X_user_UBR_visual = torch.einsum('bij,bjk->bik', adj_user_BS_visual, X_BS_BR_visual)  # (samples, num_users, 2048)
+X_user_UBR_visual = torch.einsum('bij,bjk->bik', adj_user_BS_visual, X_BS_BR_visual)  # (samples, num_users, feat_dim)
 
 # 8 B (BS)
-X_BS_B_visual = X_BS_visual  # (samples, 1, 2048)
+X_BS_B_visual = X_BS_visual  # (samples, 1, feat_dim)
 
 # 9 BU (BS-User)
-X_BS_BU_visual = torch.einsum('bij,bjk->bik', torch.permute(adj_user_BS_visual,(0,2,1)), X_user_visual)  # (samples, 1, 2048)
+X_BS_BU_visual = torch.einsum('bij,bjk->bik', torch.permute(adj_user_BS_visual,(0,2,1)), X_user_visual)  # (samples, 1, feat_dim)
 
 # 10 RU (IRS-User)
-X_IRS_RU_visual = torch.einsum('bij,bjk->bik', torch.permute(adj_user_IRS_visual,(0,2,1)), X_user_visual)  # (samples, 1, 2048)
+X_IRS_RU_visual = torch.einsum('bij,bjk->bik', torch.permute(adj_user_IRS_visual,(0,2,1)), X_user_visual)  # (samples, 1, feat_dim)
 
 # 11 BRU (BS-IRS-User)
-X_BS_BRU_visual = torch.einsum('ij,bjk->bik', adj_BS_IRS_visual, X_IRS_RU_visual)  # (samples, 1, 2048)
+X_BS_BRU_visual = torch.einsum('ij,bjk->bik', adj_BS_IRS_visual, X_IRS_RU_visual)  # (samples, 1, feat_dim)
 
 # 12 BUR (BS-User-IRS)
-X_BS_BUR_visual = torch.einsum('bij,bjk->bik', torch.permute(adj_user_BS_visual,(0,2,1)), X_user_UR_visual)  # (samples, 1, 2048)
+X_BS_BUR_visual = torch.einsum('bij,bjk->bik', torch.permute(adj_user_BS_visual,(0,2,1)), X_user_UR_visual)  # (samples, 1, feat_dim)
 
 # 13 R (IRS)
-X_IRS_R_visual = X_IRS_visual  # (samples, 1, 2048)
+X_IRS_R_visual = X_IRS_visual  # (samples, 1, feat_dim)
 
 # 14 RUB (IRS-User-BS)
-X_IRS_RUB_visual = torch.einsum('bij,bjk->bik', torch.permute(adj_user_IRS_visual,(0,2,1)), X_user_UB_visual)  # (samples, 1, 2048)
+X_IRS_RUB_visual = torch.einsum('bij,bjk->bik', torch.permute(adj_user_IRS_visual,(0,2,1)), X_user_UB_visual)  # (samples, 1, feat_dim)
 
 # 15 RBU (IRS-BS-User)
 # 修正后的 RBU 路径
-X_IRS_RBU_visual = torch.einsum('bij,bjk->bik',  torch.permute(adj_user_IRS_visual,(0,2,1)), X_BS_BU_visual)  # (samples, 1, 2048)
+X_IRS_RBU_visual = torch.einsum('bij,bjk->bik',  torch.permute(adj_user_IRS_visual,(0,2,1)), X_BS_BU_visual)  # (samples, 1, feat_dim)
 
 # 5. 合并元路径特征
-X_user_f_visual = torch.cat((X_user_U_visual, X_user_UR_visual, X_user_UB_visual, X_user_URB_visual, X_user_UBR_visual), 2)  # (samples, num_users, 2048*5)
-X_BS_f_visual = torch.cat((X_BS_B_visual, X_BS_BR_visual, X_BS_BU_visual, X_BS_BRU_visual, X_BS_BUR_visual), 2)  # (samples, 1, 2048*5)
-X_IRS_f_visual = torch.cat((X_IRS_R_visual, X_IRS_RU_visual, X_IRS_RB_visual, X_IRS_RUB_visual, X_IRS_RBU_visual), 2)  # (samples, 1, 2048*5)
+X_user_f_visual = torch.cat((X_user_U_visual, X_user_UR_visual, X_user_UB_visual, X_user_URB_visual, X_user_UBR_visual), 2)  # (samples, num_users, feat_dim*5)
+X_BS_f_visual = torch.cat((X_BS_B_visual, X_BS_BR_visual, X_BS_BU_visual, X_BS_BRU_visual, X_BS_BUR_visual), 2)  # (samples, 1, feat_dim*5)
+X_IRS_f_visual = torch.cat((X_IRS_R_visual, X_IRS_RU_visual, X_IRS_RB_visual, X_IRS_RUB_visual, X_IRS_RBU_visual), 2)  # (samples, 1, feat_dim*5)
 
 # 6. 更新特征维度
 feature_user_visual = X_user_f_visual.shape[2]
@@ -522,12 +579,12 @@ args["feature_BS_visual"] = feature_BS_visual
 args["feature_IRS_visual"] = feature_IRS_visual
 
 # 7. 重塑特征维度以匹配无线特征的处理
-X_U_V_F = X_user_f_visual.reshape(args["samples"], args.get('num_users') * feature_user_visual)  # (samples, num_users*2048*5)
-X_B_V_F = X_BS_f_visual.reshape(args["samples"], 1 * feature_BS_visual)  # (samples, 2048*5)
-X_I_V_F = X_IRS_f_visual.reshape(args["samples"], 1 * feature_IRS_visual)  # (samples, 2048*5)
+X_U_V_F = X_user_f_visual.reshape(args["samples"], args.get('num_users') * feature_user_visual)  # (samples, num_users*feat_dim*5)
+X_B_V_F = X_BS_f_visual.reshape(args["samples"], 1 * feature_BS_visual)  # (samples, feat_dim*5)
+X_I_V_F = X_IRS_f_visual.reshape(args["samples"], 1 * feature_IRS_visual)  # (samples, feat_dim*5)
 
 # 8. 合并所有视觉特征
-X_visual = torch.cat((X_U_V_F, X_B_V_F, X_I_V_F), 1)  # (samples, num_users*2048*5 + 2048*5 + 2048*5)
+X_visual = torch.cat((X_U_V_F, X_B_V_F, X_I_V_F), 1)  # (samples, num_users*feat_dim*5 + feat_dim*5 + feat_dim*5)
 
 # Define a custom Dataset class to return visual and wireless features separately
 class CustomDataset(Dataset):
@@ -542,7 +599,7 @@ class CustomDataset(Dataset):
         return self.X_visual[idx], self.X_wireless[idx]
 
 # Split the data into train, validation, and test sets
-X_train_visual = X_visual[0:args.get("train_s"), :]  # [train_s, num_users, 2048]
+X_train_visual = X_visual[0:args.get("train_s"), :]  # [train_s, num_users, feat_dim]
 X_train_wireless = X_wireless[0:args.get("train_s"), :]
 X_valid_visual = X_visual[args.get("train_s"):args.get("train_s") + args.get("validation_s"), :]
 X_valid_wireless = X_wireless[args.get("train_s"):args.get("train_s") + args.get("validation_s"), :]
